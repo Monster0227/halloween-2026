@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>给你的心跳</title>
+<style>
+  * { box-sizing: border-box }
+  html, body { margin: 0; height: 100%; overflow: hidden }
+  body { background: #100c1c; color: #ffe5eb; font-family: system-ui, sans-serif }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: manipulation;
+    background: radial-gradient(ellipse at 49% 42%, var(--halo), transparent 58%),
+                linear-gradient(145deg, var(--sky), var(--night) 68%) }
+  button { position: fixed; top: max(20px, env(safe-area-inset-top)); right: max(22px, env(safe-area-inset-right));
+    min-height: 42px; display: flex; align-items: center; gap: 9px; padding: 0 15px;
+    background: #221a2cba; color: #dec7d5; border: 1px solid #f4ccdf36;
+    border-radius: 30px; font: 12px system-ui, sans-serif; cursor: pointer }
+  button:focus-visible { outline: 2px solid #ffc7dc; outline-offset: 4px }
+  .bars { display: flex; align-items: center; gap: 2px; height: 15px }
+  .bars i { width: 2px; height: 5px; border-radius: 2px; background: #efa2bd }
+  .bars i:nth-child(2) { height: 13px }
+  .bars i:nth-child(3) { height: 9px }
+  [aria-pressed=true] i { animation: play .72s ease-in-out infinite alternate }
+  [aria-pressed=true] i:nth-child(2) { animation-delay: -.4s }
+  @keyframes play { to { transform: scaleY(.4) } }
+  main { position: fixed; left: 5%; width: 90%; text-align: center; pointer-events: none }
+  code { color: #c6a9bf; font: clamp(11px, 1.45vw, 14px) Consolas, monospace; letter-spacing: .07em }
+  code span { color: #e89dbb }
+  h1 { margin: 8px 0 0; font: 500 clamp(32px, min(6vw, 7vh), 60px)/1.3 "Songti SC","STSong","SimSun",serif;
+    letter-spacing: .12em; overflow-wrap: anywhere; color: #ffe5eb }
+  h1.done { text-shadow: 0 0 20px #ff9ac577; transition: text-shadow 1s }
+  .typing::after { content: ""; display: inline-block; width: 1px; height: .75em; background: #ef9db9 }
+  footer { position: fixed; bottom: max(18px, env(safe-area-inset-bottom)); width: 100%; text-align: center;
+    color: #ae94aa; letter-spacing: .07em; font: italic 13px Georgia, serif; pointer-events: none }
+  footer b { color: #ef99b3; font-style: normal; margin: 0 2px }
+  @media (max-height: 440px) { h1 { font-size: 26px } footer { bottom: 5px } }
+  @media (prefers-reduced-motion: reduce) { [aria-pressed=true] i { animation: none } }
+</style>
+</head>
+<body>
+<canvas aria-hidden="true"></canvas>
+<button type="button" aria-pressed="false" aria-label="音乐" id="music">
+  <span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span id="soundState">音乐关</span>
+</button>
+<main><code aria-hidden="true"><span>const</span> LOVE_MESSAGE =</code><h1></h1></main>
+<footer>Made with <b>❤</b> for you</footer>
+<script>
+"use strict";
+// 修改这里即可调整文字、心跳周期（毫秒）、粒子数量与配色。
+const CONFIG = {
+  message: "我喜欢你", beatMs: 1200, count: 2200, introMs: 2000,
+  colors: {
+    sky: "#21182f", night: "#0d0a16", halo: "#482039",
+    dust: ["#a72650", "#df3a69", "#fa6189", "#ff90ac", "#ffc1cf", "#ffebed"]
+  }
+};
+const canvas = document.querySelector("canvas"), ctx = canvas.getContext("2d");
+const main = document.querySelector("main"), heading = document.querySelector("h1");
+const music = document.querySelector("#music"), soundState = document.querySelector("#soundState");
+const colors = CONFIG.colors, palette = colors.dust, tau = Math.PI * 2;
+for (const key of ["sky","night","halo"]) document.body.style.setProperty("--" + key, colors[key]);
+const rand = Math.random, clamp = n => Math.max(0, Math.min(1, n));
+const motion = matchMedia("(prefers-reduced-motion: reduce)");
+const pointer = { x: -9999, y: -9999 };
+let w, h, unit, cx, cy, backdrop, elapsed = 0, last, nextFloat = 0;
+
+// 同一条数学曲线生成主体、漂浮爱心和烟花。屏幕的 y 轴向下。
+function heart(t) {
+  return { x: 16 * Math.sin(t) ** 3,
+    y: -(13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t)) };
+}
+const mini = new Path2D();
+for (let i = 0; i <= 80; i++) {
+  const p = heart(i * tau / 80);
+  if (i === 0) mini.moveTo(p.x/16,p.y/16); else mini.lineTo(p.x/16,p.y/16);
+}
+mini.closePath();
+function sparkle(c, x, y, r) {
+  c.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const a = i*Math.PI/4, s = i%2 ? r*.22 : r;
+    c.lineTo(x+Math.cos(a)*s, y+Math.sin(a)*s);
+  }
+  c.closePath(); c.fill();
+}
+
+// 在离屏画布中预烘焙柔光，每帧只拷贝光点，避免重复计算模糊。
+const sprites = palette.map(color => {
+  const tile = document.createElement("canvas");
+  tile.width = tile.height = 32;
+  const c = tile.getContext("2d");
+  c.shadowColor = c.fillStyle = color; c.shadowBlur = 5;
+  c.beginPath(); c.arc(16,16,3.7,0,tau); c.fill();
+  return tile;
+});
+// 按弧长采样轮廓，按扇形面积采样内部，避免尖端和凹口过密。
+const samples = [];
+let perimeter = 0, area = 0, previous = heart(0);
+for (let i=1; i<=360; i++) {
+  const p = heart(i*tau/360);
+  perimeter += Math.hypot(p.x-previous.x,p.y-previous.y);
+  area += Math.abs(previous.x*p.y-previous.y*p.x)/2;
+  samples.push({perimeter,area}); previous=p;
+}
+const particles = Array.from({length: CONFIG.count}, (_, i) => {
+  const rim = i < CONFIG.count*.26, key = rim ? "perimeter" : "area";
+  const target = rand()*(rim ? perimeter : area);
+  const index = samples.findIndex(s => s[key]>=target);
+  const p = heart((index+rand())*tau/360);
+  // 稀疏的弧形亮带穿过渐变内部，外缘粒子沿原曲线排列。
+  const band = Math.floor(rand()*10);
+  const r = rim ? 1-rand()**2*.065 : Math.sqrt(rand());
+  const depth = !rim && i%3 === 0 ? .16 + band*.079 + rand()*.016 : r;
+  const x = p.x*depth + 1.2*Math.sin(depth*Math.PI);
+  const y = p.y*depth;
+  const light = clamp(.42 - y*.019 - x*.009 + (rand()-.5)*.52 + (rim ? .2 : 0));
+  return { x, y, dx:0, dy:0, vx:0, vy:0, rim, edge:i%4, start:rand(),
+    delay:rand()*.15 + (rim ? 0 : .13),
+    size:(rim ? .83 : .66) + rand()**2*1.65, color:Math.round(light*(palette.length-1)) };
+});
+
+// 星幕与两段倾斜的星尘轨迹仅在尺寸变化时重绘。
+function resize() {
+  w = canvas.clientWidth; h = canvas.clientHeight;
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  canvas.width = Math.round(w*dpr); canvas.height = Math.round(h*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  unit = Math.min(w*.65/32, h*.46/32, 13);
+  cx = w/2; cy = h*.43;
+  main.style.top = (cy + unit*19.5 + Math.min(18,h*.018)) + "px";
+  backdrop = document.createElement("canvas");
+  backdrop.width = canvas.width; backdrop.height = canvas.height;
+  const c = backdrop.getContext("2d"); c.scale(dpr,dpr);
+  c.fillStyle = "#ffe3eb";
+  for (let i = 0; i < Math.min(540,w*h/2800+55); i++) {
+    c.globalAlpha = .14+rand()*.55;
+    const x = rand()*w, y = rand()*h;
+    if (i%27 === 0) sparkle(c,x,y,1.6+rand()*2.5);
+    else c.fillRect(x,y,.5+rand(),.5+rand());
+  }
+  for (let i = 0; i < 540; i++) {
+    const a = rand()*tau, spread = (rand()-.5)*unit*.6;
+    const x = Math.cos(a)*unit*23, y = Math.sin(a)*unit*4.5+spread;
+    c.globalAlpha = .08+.38*rand(); c.fillStyle = palette[3+i%3];
+    c.fillRect(cx+x*.946+y*.324,cy-x*.324+y*.946,1,1);
+  }
+}
+resize(); addEventListener("resize", resize);
+
+// 两个分开的脉冲各自回落到 1；剩余时间留给停顿。
+function beat(phase, start, width) {
+  return Math.sin(Math.PI*clamp((phase-start)/width))**2;
+}
+function drawHeart(dt) {
+  const intro = motion.matches ? 1 : clamp(elapsed*1000/CONFIG.introMs);
+  const phase = (elapsed*1000 % CONFIG.beatMs)/CONFIG.beatMs;
+  const scale = motion.matches ? 1 : 1 + .08*beat(phase,0,.24) + .055*beat(phase,.30,.22);
+  const step = Math.min(dt,.032), damping = Math.exp(-11*step);
+  const reach = Math.min(85,unit*7);
+  for (const p of particles) {
+    let x = cx+p.x*unit*scale, y = cy+p.y*unit*scale;
+    if (intro < 1) {
+      const q = clamp((intro-p.delay)/(p.rim ? .65 : 1-p.delay)), left = (1-q)**3;
+      const sx = [p.start*w,w+20,p.start*w,-20][p.edge];
+      const sy = [-20,p.start*h,h+20,p.start*h][p.edge];
+      x += (sx-x)*left; y += (sy-y)*left + Math.sin(q*Math.PI)*left*60;
+    }
+    const ax = x-pointer.x, ay = y-pointer.y, dist = Math.hypot(ax,ay);
+    const force = !motion.matches && dist < reach ? 1500*(1-dist/reach)/(dist||1) : 0;
+    p.vx = (p.vx+(ax*force-95*p.dx)*step)*damping;
+    p.vy = (p.vy+(ay*force-95*p.dy)*step)*damping;
+    p.dx += p.vx*step; p.dy += p.vy*step;
+    const size = p.size*Math.max(.67,unit/11)*5;
+    ctx.drawImage(sprites[p.color], x+p.dx-size/2, y+p.dy-size/2, size,size);
+  }
+}
+
+const motes = [];
+function addMote(x,y,vx,vy,size,life,star=false) {
+  if (motes.length >= 220) motes.shift();
+  motes.push({x,y,vx,vy,size,life,age:0,star,angle:(rand()-.5)*.6,
+    spin:(rand()-.5)*1.5, color:palette[2+Math.floor(rand()*(palette.length-2))]});
+}
+function drawMotes(dt) {
+  if (!motion.matches && elapsed > nextFloat) {
+    const p = heart(rand()*tau);
+    addMote(cx+p.x*unit*1.06,cy+p.y*unit,(rand()-.5)*16,-16-rand()*16,2+rand()*3,2+rand()*2,rand()<.55);
+    nextFloat = elapsed+.20;
+  }
+  for (let i=motes.length-1; i>=0; i--) {
+    const m = motes[i]; m.age += dt;
+    if (m.age >= m.life) { motes.splice(i,1); continue }
+    m.x += m.vx*dt; m.y += m.vy*dt; m.angle += m.spin*dt;
+    const fade = 1-m.age/m.life;
+    ctx.save(); ctx.globalAlpha = fade; ctx.fillStyle = m.color;
+    ctx.translate(m.x,m.y); ctx.rotate(m.angle); ctx.scale(m.size,m.size);
+    if (m.star) sparkle(ctx,0,0,1); else ctx.fill(mini);
+    ctx.restore();
+  }
+}
+addEventListener("pointermove", e => {
+  if (e.pointerType !== "touch") { pointer.x=e.clientX; pointer.y=e.clientY }
+});
+function releasePointer() { pointer.x=pointer.y=-9999 }
+document.documentElement.addEventListener("pointerleave",releasePointer);
+addEventListener("blur",releasePointer);
+canvas.addEventListener("pointerdown", e => {
+  const offset = rand()*tau;
+  for (let i=0;i<24;i++) {
+    const a = offset+i*tau/24, speed = motion.matches ? 18 : 64+rand()*46;
+    addMote(e.clientX,e.clientY,Math.cos(a)*speed,Math.sin(a)*speed,3+rand()*3,.75+rand()*.5);
+  }
+  if (soundOn) tone(783.99,.6);
+});
+
+// 声音仅由用户开启；用正弦振荡器和音量包络合成轻柔琶音。
+let audio, master, soundOn=false, note=0, nextNote=0;
+const melody = [261.63,392,493.88,392,329.63,392,523.25,392];
+function tone(freq,duration) {
+  const t = audio.currentTime, osc = audio.createOscillator(), gain = audio.createGain();
+  osc.frequency.value=freq; gain.gain.setValueAtTime(.0001,t);
+  gain.gain.exponentialRampToValueAtTime(.08,t+.06);
+  gain.gain.exponentialRampToValueAtTime(.0001,t+duration);
+  osc.connect(gain); gain.connect(master); osc.start(t); osc.stop(t+duration);
+  osc.onended=()=>{ osc.disconnect(); gain.disconnect() };
+}
+music.onclick = async () => {
+  music.disabled=true;
+  try {
+    if (!audio) {
+      audio = new (window.AudioContext || window.webkitAudioContext)();
+      master=audio.createGain(); master.gain.value=0; master.connect(audio.destination);
+    }
+    if (!soundOn) await audio.resume();
+    soundOn=!soundOn;
+    master.gain.setTargetAtTime(soundOn ? .46 : 0,audio.currentTime,.025);
+    nextNote=elapsed; music.setAttribute("aria-pressed",String(soundOn));
+    soundState.textContent=soundOn ? "音乐开" : "音乐关";
+  } catch { soundState.textContent="音频不可用" }
+  finally { music.disabled=false }
+};
+
+const letters = Array.from('"' + CONFIG.message + '"');
+heading.setAttribute("aria-label", CONFIG.message);
+let typed=0;
+function frame(now) {
+  const dt=last===undefined ? 0 : Math.min((now-last)/1000,.1);
+  last=now; elapsed+=dt;
+  ctx.clearRect(0,0,w,h); ctx.drawImage(backdrop,0,0,w,h);
+  drawHeart(dt); drawMotes(dt);
+  const n = motion.matches ? letters.length : Math.min(letters.length,
+    Math.max(0,Math.floor((elapsed-CONFIG.introMs/1000+.12)/.16)));
+  if (n!==typed) {
+    heading.textContent=letters.slice(0,n).join(""); typed=n;
+    heading.className=n===letters.length ? "done" : "typing";
+  }
+  if (soundOn && elapsed>=nextNote) {
+    tone(melody[note++%melody.length],1.35); nextNote=elapsed+.58;
+  }
+  requestAnimationFrame(frame);
+}
+document.addEventListener("visibilitychange",()=>{ last=undefined; releasePointer() });
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
